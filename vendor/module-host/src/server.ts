@@ -6,6 +6,27 @@ export type RpcHandler = (params: unknown) => unknown | Promise<unknown>;
 
 export interface Migration { v: number; up: (db: Database) => void }
 
+// The subset of JSON Schema the host's built-in validator understands. Modules
+// declare their config shape with this via host.settings.define(). Supported
+// keywords: type, properties, required, enum, items, default, and the numeric
+// (minimum/maximum) + string (minLength/maxLength) + array (minItems/maxItems)
+// bounds. On validation, a field that fails is replaced by its schema `default`
+// (or the current value); unknown keywords are ignored. Not full JSON Schema.
+export interface JsonSchema {
+  type?: "object" | "array" | "string" | "number" | "integer" | "boolean";
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+  items?: JsonSchema;
+  enum?: unknown[];
+  default?: unknown;
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  minItems?: number;
+  maxItems?: number;
+}
+
 // An Effect is produced by host.sync.* and returned from an onMessage handler.
 // Its internals are core-private; modules treat it as an opaque token.
 export type Effect = unknown;
@@ -66,6 +87,23 @@ export interface ServerHost {
   kv: {
     get(key: string): unknown;
     set(key: string, value: unknown): void;
+  };
+  // Schema-validated, single-object config for this module (module_settings
+  // table). One config blob per module, versioned (OCC). Prefer this over kv
+  // for a module's user-facing settings: the host validates every write against
+  // the declared schema and exposes the schema to clients for rendering a UI.
+  settings: {
+    // Declare the config's JSON Schema and its default. Seeds the stored config
+    // with `def` on first boot (never clobbers an existing row). The schema is
+    // retained for write-validation and client exposure. Call once in activate().
+    define(schema: JsonSchema, def: unknown): void;
+    // The current stored config (validated/coerced against the schema).
+    get(): unknown;
+    // Merge+validate a patch onto the current config, persist, broadcast the new
+    // config to all clients, and return it. Invalid fields fall back per-field.
+    set(patch: unknown): unknown;
+    // The declared schema (null until define() runs).
+    schema(): JsonSchema | null;
   };
   // Shared SQLite handle. The module owns its own tables via migrate().
   db: Database;

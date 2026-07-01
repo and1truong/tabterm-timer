@@ -1,4 +1,4 @@
-import type { ServerHost } from "@tabterm/module-host/server";
+import type { ServerHost, JsonSchema } from "@tabterm/module-host/server";
 import type { Alarm, AlarmFire, TimerConfig, TimerRunState } from "./shared.ts";
 
 // ---------------------------------------------------------------------------
@@ -538,16 +538,108 @@ export function createTimerEngine(opts: TimerEngineOptions): TimerEngine {
   };
 }
 
+// The module's whole config, one schema-validated object in module_settings
+// (host.settings). It folds the three sub-feature configs — timers, alarms,
+// pomodoro — that previously lived in three separate module_kv rows. The host
+// validates every write against this schema and exposes it to clients.
+const CONFIG_SCHEMA: JsonSchema = {
+  type: "object",
+  properties: {
+    timers: {
+      type: "object",
+      properties: {
+        timers: {
+          type: "array",
+          maxItems: 50,
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              label: { type: "string", maxLength: 80, default: "Timer" },
+              durationMs: { type: "integer", minimum: 1000, maximum: 86_400_000, default: 60_000 },
+              sound: { type: "string", maxLength: 40, default: "bell" },
+            },
+          },
+          default: [],
+        },
+        volume: { type: "number", minimum: 0, maximum: 1, default: 0.5 },
+        muted: { type: "boolean", default: false },
+      },
+    },
+    alarms: {
+      type: "object",
+      properties: {
+        alarms: {
+          type: "array",
+          maxItems: 50,
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              label: { type: "string", maxLength: 80, default: "Alarm" },
+              hour: { type: "integer", minimum: 0, maximum: 23, default: 0 },
+              minute: { type: "integer", minimum: 0, maximum: 59, default: 0 },
+              days: { type: "array", items: { type: "integer", minimum: 0, maximum: 6 }, default: [] },
+              enabled: { type: "boolean", default: true },
+              sound: { type: "string", maxLength: 40, default: "bell" },
+              lastFiredTs: { type: "number", default: 0 },
+            },
+          },
+          default: [],
+        },
+        volume: { type: "number", minimum: 0, maximum: 1, default: 0.5 },
+        muted: { type: "boolean", default: false },
+      },
+    },
+    pomodoro: {
+      type: "object",
+      properties: {
+        phases: {
+          type: "array",
+          maxItems: 20,
+          items: {
+            type: "object",
+            properties: {
+              label: { type: "string", maxLength: 40, default: "Phase" },
+              ms: { type: "integer", minimum: 1000, maximum: 86_400_000, default: 60_000 },
+            },
+          },
+          default: DEFAULT_TIMER_CONFIG.phases,
+        },
+        sound: { type: "string", maxLength: 32, default: "bell" },
+        volume: { type: "number", minimum: 0, maximum: 1, default: 0.5 },
+        muted: { type: "boolean", default: false },
+      },
+    },
+  },
+};
+
+const CONFIG_DEFAULT = {
+  timers: { timers: [], volume: 0.5, muted: false } satisfies TimersConfig,
+  alarms: { alarms: [], volume: 0.5, muted: false } satisfies AlarmsModuleConfig,
+  pomodoro: DEFAULT_TIMER_CONFIG,
+};
+
+// A kv-shaped adapter over one sub-key of the unified settings object, so the
+// engines keep their existing { get, set } config handle unchanged. get()/set()
+// read/write host.settings; a set merges just this sub-key (the host validates
+// the whole object against CONFIG_SCHEMA and broadcasts it).
+function subConfig(host: ServerHost, key: "timers" | "alarms" | "pomodoro") {
+  return {
+    get: () => (host.settings.get() as Record<string, unknown>)?.[key] ?? null,
+    set: (_k: string, value: unknown) => host.settings.set({ [key]: value }),
+  };
+}
+
 export default function activate(host: ServerHost): () => void {
-  // ---- timers sub-feature (kv key "timers", events "timers:*") -------------
-  if (host.kv.get("timers") == null) {
-    host.kv.set("timers", { timers: [], volume: 0.5, muted: false });
-  }
+  host.settings.define(CONFIG_SCHEMA, CONFIG_DEFAULT);
+
+  // ---- timers sub-feature (settings.timers, events "timers:*") -------------
   const timersEngine = createTimerEntryEngine({
     now: host.now,
     schedule: host.schedule,
     broadcast: (event, payload) => host.broadcast(`timers:${event}`, payload),
-    kv: { get: () => host.kv.get("timers"), set: (_k, v) => host.kv.set("timers", v) },
+    kv: subConfig(host, "timers"),
   });
   host.registerRpc("timers:start", (p) => timersEngine.start((p as { id: string }).id));
   host.registerRpc("timers:pause", (p) => timersEngine.pause((p as { id: string }).id));
@@ -558,16 +650,13 @@ export default function activate(host: ServerHost): () => void {
     return timersEngine.getStates();
   });
 
-  // ---- alarms sub-feature (kv key "alarms", events "alarms:*") -------------
-  if (host.kv.get("alarms") == null) {
-    host.kv.set("alarms", { alarms: [], volume: 0.5, muted: false });
-  }
+  // ---- alarms sub-feature (settings.alarms, events "alarms:*") -------------
   const alarmsEngine = createAlarmEngine({
     now: host.now,
     schedule: host.schedule,
     interval: host.interval,
     broadcast: (event, payload) => host.broadcast(`alarms:${event}`, payload),
-    kv: { get: () => host.kv.get("alarms"), set: (_k, v) => host.kv.set("alarms", v) },
+    kv: subConfig(host, "alarms"),
   });
   host.registerRpc("alarms:configUpdate", (params) => {
     alarmsEngine.setConfig(params as Parameters<typeof alarmsEngine.setConfig>[0]);
@@ -578,8 +667,8 @@ export default function activate(host: ServerHost): () => void {
     alarmsEngine.dismiss(payload.kind, payload.id);
   });
 
-  // ---- pomodoro sub-feature (kv key "pomodoro", events "pomodoro:*") -------
-  const pomoCfg = (host.kv.get("pomodoro") as TimerConfig | null) ?? DEFAULT_TIMER_CONFIG;
+  // ---- pomodoro sub-feature (settings.pomodoro, events "pomodoro:*") -------
+  const pomoCfg = (subConfig(host, "pomodoro").get() as TimerConfig | null) ?? DEFAULT_TIMER_CONFIG;
   const pomoEngine = createTimerEngine({
     now: host.now,
     schedule: host.schedule,
@@ -594,7 +683,7 @@ export default function activate(host: ServerHost): () => void {
   host.registerRpc("pomodoro:getState", () => pomoEngine.getState());
   host.registerRpc("pomodoro:setConfig", (params) => {
     const cfg = params as TimerConfig;
-    host.kv.set("pomodoro", cfg);
+    subConfig(host, "pomodoro").set("config", cfg);
     return pomoEngine.setConfig(cfg);
   });
 

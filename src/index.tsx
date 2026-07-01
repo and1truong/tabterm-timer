@@ -5,6 +5,23 @@ import {
   AlarmClock, BellRing,
 } from "lucide-react";
 
+// The module keeps its whole config in one schema-validated host.settings object
+// with sub-keys { timers, alarms, pomodoro } (see server.ts CONFIG_SCHEMA). These
+// helpers read/subscribe to one sub-key of that object, so each sub-feature's
+// client stays keyed by its own name.
+function getSub<T>(host: ClientHost, key: "timers" | "alarms" | "pomodoro"): T | null {
+  return ((host.settings.get() as Record<string, unknown> | null)?.[key] as T) ?? null;
+}
+function subscribeSub<T>(
+  host: ClientHost,
+  key: "timers" | "alarms" | "pomodoro",
+  cb: (v: T | null) => void,
+): () => void {
+  return host.settings.subscribe((config) => {
+    cb(((config as Record<string, unknown> | null)?.[key] as T) ?? null);
+  });
+}
+
 // ===========================================================================
 // TIMERS
 // ===========================================================================
@@ -257,17 +274,15 @@ function TimersVolumeRow({
 const TIMERS_DEFAULT_CONFIG: TimersConfig = { timers: [], volume: 0.5, muted: false };
 
 function TimersBox({ host }: { host: ClientHost }) {
-  const [config, setConfig] = useState<TimersConfig>(() => {
-    const raw = host.kv.get("timers") as TimersConfig | null;
-    return raw ?? TIMERS_DEFAULT_CONFIG;
-  });
+  const [config, setConfig] = useState<TimersConfig>(
+    () => getSub<TimersConfig>(host, "timers") ?? TIMERS_DEFAULT_CONFIG,
+  );
   const [states, setStates] = useState<TimerEntryRunState[]>([]);
   const [, tick] = useState(0);
 
-  // Config sync from kv
+  // Config sync from host.settings
   useEffect(() => {
-    return host.kv.subscribe("timers", (raw) => {
-      const next = raw as TimersConfig | null;
+    return subscribeSub<TimersConfig>(host, "timers", (next) => {
       setConfig(next ?? TIMERS_DEFAULT_CONFIG);
     });
   }, []);
@@ -611,17 +626,14 @@ function AlarmsVolumeRow({
 // ---------------------------------------------------------------------------
 
 function AlarmsBox({ host }: { host: ClientHost }) {
-  const [config, setConfig] = useState<AlarmsModuleConfig>(() => {
-    const raw = host.kv.get("alarms") as AlarmsModuleConfig | null;
-    return raw ?? ALARMS_DEFAULT_CONFIG;
-  });
+  const [config, setConfig] = useState<AlarmsModuleConfig>(
+    () => getSub<AlarmsModuleConfig>(host, "alarms") ?? ALARMS_DEFAULT_CONFIG,
+  );
 
   useEffect(() => {
-    const off = host.kv.subscribe("alarms", (raw) => {
-      const next = raw as AlarmsModuleConfig | null;
+    return subscribeSub<AlarmsModuleConfig>(host, "alarms", (next) => {
       setConfig(next ?? ALARMS_DEFAULT_CONFIG);
     });
-    return off;
   }, []);
 
   function sendConfig(next: AlarmsModuleConfig) {
@@ -918,12 +930,11 @@ export default function activate(host: ClientHost): () => void {
     if (payload.kind !== "timer") return;
     if (payload.seq <= timersLastSeq) return;
     timersLastSeq = payload.seq;
-    const config = (host.kv.get("timers") as TimersConfig | null) ?? TIMERS_DEFAULT_CONFIG;
+    const config = getSub<TimersConfig>(host, "timers") ?? TIMERS_DEFAULT_CONFIG;
     host.actions.playChime(payload.sound, config.muted ? 0 : config.volume);
     host.actions.notify({ title: "Timer", body: payload.label });
   });
   const offTimersInit = host.events.on("host:init", () => { timersLastSeq = -1; });
-  const offTimersKv = host.kv.subscribe("timers", () => {});
   const TimersBound = () => <TimersBox host={host} />;
 
   // ---- alarms -------------------------------------------------------------
@@ -935,13 +946,12 @@ export default function activate(host: ClientHost): () => void {
     if (payload.kind !== "alarm") return;
     if (payload.seq <= alarmsLastSeq) return;
     alarmsLastSeq = payload.seq;
-    const config = (host.kv.get("alarms") as AlarmsModuleConfig | null) ?? ALARMS_DEFAULT_CONFIG;
+    const config = getSub<AlarmsModuleConfig>(host, "alarms") ?? ALARMS_DEFAULT_CONFIG;
     host.actions.playChime(payload.sound, config.muted ? 0 : config.volume);
     host.actions.notify({ title: "Alarm", body: payload.label });
     pushRinging({ kind: "alarm", id: payload.id, label: payload.label });
   });
   const offAlarmsInit = host.events.on("host:init", () => { alarmsLastSeq = -1; });
-  const offAlarmsKv = host.kv.subscribe("alarms", () => {});
   const AlarmsBound = () => <AlarmsBox host={host} />;
   const ChipBound = () => <RingingChip host={host} />;
 
@@ -968,8 +978,8 @@ export default function activate(host: ClientHost): () => void {
   });
 
   return () => {
-    offTimersFire(); offTimersInit(); offTimersKv();
-    offAlarmsFire(); offAlarmsInit(); offAlarmsKv();
+    offTimersFire(); offTimersInit();
+    offAlarmsFire(); offAlarmsInit();
     offUI();
     setRinging([]);
   };

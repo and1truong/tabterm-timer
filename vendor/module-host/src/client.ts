@@ -1,4 +1,5 @@
 import type { ComponentType, ReactNode } from "react";
+import type { JsonSchema } from "./server.ts";
 
 // Registration payloads — module-author facing (the host injects moduleId).
 // Shapes mirror src/client/modules/registries.ts exactly.
@@ -168,6 +169,17 @@ export interface ClientHost {
     get(key: string): unknown;
     set(key: string, value: unknown): void;
     subscribe(key: string, cb: (v: unknown) => void): () => void;
+  };
+  // Schema-validated module config (server-side module_settings). Mirror of the
+  // server's host.settings: get the current config, set a patch (server merges,
+  // validates against the declared schema, persists, and broadcasts the result),
+  // subscribe to changes, and read the declared JSON Schema (for rendering a
+  // config UI). The config is available at mount (seeded from the init payload).
+  settings: {
+    get(): unknown;
+    set(patch: unknown): void;
+    subscribe(cb: (config: unknown) => void): () => void;
+    schema(): JsonSchema | null;
   };
   store: {
     use<T>(selector: (s: Record<string, Record<string, any>>) => T): T;
