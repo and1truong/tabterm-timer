@@ -174,6 +174,25 @@ describe("start / pause / resume / reset", () => {
   });
 });
 
+describe("manual state broadcasts", () => {
+  test("start, pause, resume, and reset each broadcast the current states", () => {
+    let clock = 1_000_000;
+    const { engine, statesBroadcasts, setTime } = makeEngine(baseCfg(), clock);
+
+    engine.start("tea");
+    clock += 60_000;
+    setTime(clock);
+    engine.pause("tea");
+    engine.resume("tea");
+    engine.reset("tea");
+
+    expect(statesBroadcasts).toHaveLength(4);
+    expect(statesBroadcasts.map((states) => states.find((s) => s.id === "tea")!.running))
+      .toEqual([true, false, true, false]);
+    expect(statesBroadcasts.at(-1)!.find((s) => s.id === "tea")!.remainingMs).toBe(4 * 60_000);
+  });
+});
+
 describe("fire resets to idle + bumps seq", () => {
   test("scheduled fire broadcasts fire event + resets timer to idle + broadcasts states", () => {
     const clock = 1_000_000;
@@ -187,9 +206,9 @@ describe("fire resets to idle + bumps seq", () => {
     expect(fires[0]!.id).toBe("tea");
     expect(fires[0]!.seq).toBe(1);
 
-    // states broadcast after fire → tea is back to idle
-    expect(statesBroadcasts).toHaveLength(1);
-    const teaAfter = statesBroadcasts[0]!.find((s) => s.id === "tea")!;
+    // start and fire each broadcast state; the final broadcast has tea idle.
+    expect(statesBroadcasts).toHaveLength(2);
+    const teaAfter = statesBroadcasts.at(-1)!.find((s) => s.id === "tea")!;
     expect(teaAfter.running).toBe(false);
     expect(teaAfter.remainingMs).toBe(4 * 60_000);
   });

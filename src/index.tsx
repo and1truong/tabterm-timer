@@ -287,12 +287,18 @@ function TimersBox({ host }: { host: ClientHost }) {
     });
   }, []);
 
-  // Live states from server events
+  // Subscribe before seeding, so a concurrent state broadcast cannot be
+  // overwritten by an older getStates response.
   useEffect(() => {
-    return host.events.on("timers:states", (raw) => {
-      const env = raw as { payload: TimerEntryRunState[] };
-      setStates(env.payload);
+    let receivedUpdate = false;
+    const off = host.events.on("timers:states", (raw) => {
+      receivedUpdate = true;
+      setStates(raw as TimerEntryRunState[]);
     });
+    host.rpc.call("timers:getStates").then((initial: TimerEntryRunState[]) => {
+      if (!receivedUpdate) setStates(initial);
+    });
+    return off;
   }, []);
 
   // 1s tick to re-render live countdowns
@@ -716,6 +722,14 @@ interface PomoRunState {
   autoAdvances: number;
 }
 
+interface PomodoroConfig {
+  sound: string;
+  volume: number;
+  muted: boolean;
+}
+
+const POMODORO_DEFAULT_CONFIG: PomodoroConfig = { sound: "bell", volume: 0.5, muted: false };
+
 function fmtPomo(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
@@ -818,7 +832,9 @@ function Chip({ host }: { host: ClientHost }) {
   const [state, setState] = useState<PomoRunState | null>(null);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const lastAutoAdvances = useRef(-1);
+  // A manual start broadcasts autoAdvances: 0. Treat zero as the idle
+  // baseline so that start does not incorrectly chime as an auto-advance.
+  const lastAutoAdvances = useRef(0);
 
   // Seed initial state + subscribe to broadcasts
   useEffect(() => {
@@ -831,12 +847,11 @@ function Chip({ host }: { host: ClientHost }) {
     });
 
     const off = host.events.on("pomodoro:state", (raw) => {
-      const envelope = raw as { moduleId: string; payload: PomoRunState | null };
-      const incoming = envelope.payload;
+      const incoming = raw as PomoRunState | null;
       setState(incoming);
       if (incoming !== null && incoming.autoAdvances > lastAutoAdvances.current) {
-        // Auto-advance fired: chime. Use bell/0.5 as sensible defaults.
-        host.actions.playChime("bell", 0.5);
+        const config = getSub<PomodoroConfig>(host, "pomodoro") ?? POMODORO_DEFAULT_CONFIG;
+        host.actions.playChime(config.sound, config.muted ? 0 : config.volume);
         lastAutoAdvances.current = incoming.autoAdvances;
       } else if (incoming !== null) {
         lastAutoAdvances.current = incoming.autoAdvances;
@@ -925,8 +940,7 @@ export default function activate(host: ClientHost): () => void {
   // ---- timers -------------------------------------------------------------
   let timersLastSeq = -1;
   const offTimersFire = host.events.on("timers:fire", (raw) => {
-    const env = raw as { payload: { kind: string; id: string; label: string; sound: string; seq: number } };
-    const payload = env.payload;
+    const payload = raw as { kind: string; id: string; label: string; sound: string; seq: number };
     if (payload.kind !== "timer") return;
     if (payload.seq <= timersLastSeq) return;
     timersLastSeq = payload.seq;
@@ -941,8 +955,7 @@ export default function activate(host: ClientHost): () => void {
   setRinging([]);
   let alarmsLastSeq = -1;
   const offAlarmsFire = host.events.on("alarms:fire", (raw) => {
-    const envelope = raw as { moduleId: string; payload: { kind: string; id: string; label: string; sound: string; seq: number } };
-    const payload = envelope.payload;
+    const payload = raw as { kind: string; id: string; label: string; sound: string; seq: number };
     if (payload.kind !== "alarm") return;
     if (payload.seq <= alarmsLastSeq) return;
     alarmsLastSeq = payload.seq;

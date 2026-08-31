@@ -75,6 +75,12 @@ export function createTimerEntryEngine(opts: TimerEntryEngineOptions): TimerEntr
     return config.timers.map((t) => timerRuns.get(t.id) ?? idle(t.id, t.durationMs));
   }
 
+  function broadcastStates(): TimerEntryRunState[] {
+    const states = getStates();
+    broadcast("states", states);
+    return states;
+  }
+
   function durationOf(id: string): number {
     return config.timers.find((t) => t.id === id)?.durationMs ?? 0;
   }
@@ -105,7 +111,7 @@ export function createTimerEntryEngine(opts: TimerEntryEngineOptions): TimerEntr
     seq += 1;
     broadcast("fire", { kind: "timer", id, label: entry.label, sound: entry.sound, seq } satisfies TimerEntryAlarmFire);
     timerRuns.set(id, idle(id, entry.durationMs));
-    broadcast("states", getStates());
+    broadcastStates();
   }
 
   // Drop run state + cancel schedules for timers no longer in config; keep the rest.
@@ -128,7 +134,7 @@ export function createTimerEntryEngine(opts: TimerEntryEngineOptions): TimerEntr
       if (ms <= 0) return getStates();
       timerRuns.set(id, { id, running: true, endTs: now() + ms, remainingMs: ms });
       armEntry(id);
-      return getStates();
+      return broadcastStates();
     },
 
     pause(id: string): TimerEntryRunState[] {
@@ -136,6 +142,7 @@ export function createTimerEntryEngine(opts: TimerEntryEngineOptions): TimerEntr
       if (st && st.running) {
         timerRuns.set(id, { ...st, running: false, remainingMs: Math.max(0, st.endTs - now()) });
         clearPending(id);
+        return broadcastStates();
       }
       return getStates();
     },
@@ -145,6 +152,7 @@ export function createTimerEntryEngine(opts: TimerEntryEngineOptions): TimerEntr
       if (st && !st.running && st.remainingMs > 0) {
         timerRuns.set(id, { ...st, running: true, endTs: now() + st.remainingMs });
         armEntry(id);
+        return broadcastStates();
       }
       return getStates();
     },
@@ -152,14 +160,14 @@ export function createTimerEntryEngine(opts: TimerEntryEngineOptions): TimerEntr
     reset(id: string): TimerEntryRunState[] {
       clearPending(id);
       timerRuns.set(id, idle(id, durationOf(id)));
-      return getStates();
+      return broadcastStates();
     },
 
     setConfig(next: TimersConfig): void {
       config = next;
       kv.set("config", config);
       syncTimerRuns();
-      broadcast("states", getStates());
+      broadcastStates();
     },
 
     dispose(): void {
@@ -268,7 +276,10 @@ export function createAlarmEngine(opts: AlarmEngineOptions): AlarmEngine {
   function seedLastFired(): void {
     const t = opts.now();
     for (const a of config.alarms) {
-      if (a.lastFiredTs === undefined) a.lastFiredTs = t;
+      // host.settings coerces absent numeric fields to their default (0), so
+      // treat that sentinel exactly like an absent value. Otherwise a newly
+      // created alarm can fire a past occurrence on the next safety pass.
+      if (a.lastFiredTs === undefined || a.lastFiredTs <= 0) a.lastFiredTs = t;
     }
   }
 
@@ -522,6 +533,7 @@ export function createTimerEngine(opts: TimerEngineOptions): TimerEngine {
             autoAdvances: run.autoAdvances,
           };
       reschedule();
+      opts.broadcast(run);
       return run;
     },
 
@@ -596,6 +608,7 @@ const CONFIG_SCHEMA: JsonSchema = {
       properties: {
         phases: {
           type: "array",
+          minItems: 1,
           maxItems: 20,
           items: {
             type: "object",
@@ -641,6 +654,7 @@ export default function activate(host: ServerHost): () => void {
     broadcast: (event, payload) => host.broadcast(`timers:${event}`, payload),
     kv: subConfig(host, "timers"),
   });
+  host.registerRpc("timers:getStates", () => timersEngine.getStates());
   host.registerRpc("timers:start", (p) => timersEngine.start((p as { id: string }).id));
   host.registerRpc("timers:pause", (p) => timersEngine.pause((p as { id: string }).id));
   host.registerRpc("timers:resume", (p) => timersEngine.resume((p as { id: string }).id));
