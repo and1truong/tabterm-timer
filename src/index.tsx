@@ -832,7 +832,9 @@ function Chip({ host }: { host: ClientHost }) {
   const [state, setState] = useState<PomoRunState | null>(null);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const lastAutoAdvances = useRef(-1);
+  // A manual start broadcasts autoAdvances: 0. Treat zero as the idle
+  // baseline so that start does not incorrectly chime as an auto-advance.
+  const lastAutoAdvances = useRef(0);
 
   // Seed initial state + subscribe to broadcasts
   useEffect(() => {
