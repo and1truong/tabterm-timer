@@ -169,6 +169,20 @@ describe("setConfig", () => {
     expect(s!.remainingMs).toBe(5_000);
   });
 
+  test("broadcasts the updated state when running", () => {
+    let t = 1000;
+    const { schedule } = makeSchedule();
+    const broadcasts: any[] = [];
+    const eng = createTimerEngine({ now: () => t, schedule, broadcast: (s) => broadcasts.push(s), config: PHASES });
+    eng.start();
+    const before = broadcasts.length;
+
+    eng.setConfig({ ...PHASES, phases: [{ label: "Long", ms: 99 * 60_000 }, ...PHASES.phases.slice(1)] });
+
+    expect(broadcasts).toHaveLength(before + 1);
+    expect(broadcasts.at(-1)!.remainingMs).toBe(99 * 60_000);
+  });
+
   test("returns null when idle", () => {
     const { schedule } = makeSchedule();
     const eng = createTimerEngine({ now: () => 0, schedule, broadcast: () => {}, config: PHASES });

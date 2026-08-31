@@ -202,6 +202,21 @@ describe("alarm firing + miss recovery", () => {
     expect(fires).toHaveLength(0);
   });
 
+  test("a schema-defaulted lastFiredTs does not cause a retroactive fire", () => {
+    // host.settings fills a missing numeric field with 0. It must still be
+    // treated as a newly-created alarm, not as an occurrence at Unix epoch.
+    const cfg: AlarmsModuleConfig = {
+      alarms: [oneShot(8, 0, { lastFiredTs: 0 })],
+      volume: 0.5,
+      muted: false,
+    };
+    const { engine, fires, kv } = makeEngine(cfg, wed0900);
+
+    engine.fireDuePass();
+    expect(fires).toHaveLength(0);
+    expect(kv.stored()!.alarms[0]!.lastFiredTs).toBe(wed0900);
+  });
+
   test("fires once when occurrence is reached, not again on second pass", () => {
     const cfg: AlarmsModuleConfig = { alarms: [oneShot(9, 30)], volume: 0.5, muted: false };
     const { engine, fires, setTime } = makeEngine(cfg, wed0900);
